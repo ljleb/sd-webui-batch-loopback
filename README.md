@@ -1,4 +1,4 @@
-# sd-webui-batch-loopback
+# Batch Loopback
 
 Batch loopback alwayson script for a1111 webui. Adds multiple options for merging the output of each iteration with the input of the next.
 
