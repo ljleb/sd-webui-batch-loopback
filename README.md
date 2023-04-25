@@ -1,6 +1,6 @@
 # Batch Loopback
 
-Batch loopback script for a1111 webui. Adds multiple options for merging the output of each iteration with the input of the next.
+[WIP] Batch loopback script for a1111 webui. Adds multiple options for merging the output of each iteration with the input of the next.
 
 Allows to use other selectable scripts along with it.
 
