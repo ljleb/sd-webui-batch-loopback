@@ -22,40 +22,49 @@ class Script(scripts.Script):
 
     def ui(self, is_img2img):
         last_image = gr.Image(label="Last image", type="pil")
-        min_denoising_strength = gr.Slider(label="Min denoising strength", minimum=0.0, maximum=1.0, value=0.35)
-        controlnet_weight_master = gr.Slider(label="Controlnet weight master", minimum=-2.0, maximum=2.0, value=1.0)
+        min_denoising_strength = gr.Slider(label="Min denoising strength", minimum=0.0, maximum=1.0, value=0.0)
+        controlnet_master_weight = gr.Slider(label="Controlnet master weight", minimum=-2.0, maximum=2.0, value=1.0)
+        parent_skew = gr.Slider(label="Parent skew", minimum=-2.0, maximum=2.0, value=0.0)
+        neighbors_proximity_skew = gr.Slider(label="Proximity skew", minimum=-2.0, maximum=2.0, value=0.0)
         steps = gr.Number(label="Intermediate steps")
         output_directory = gr.Textbox(label="Output directory")
-        return [last_image, min_denoising_strength, controlnet_weight_master, steps, output_directory]
+        return [last_image, min_denoising_strength, controlnet_master_weight, parent_skew, neighbors_proximity_skew, steps, output_directory]
 
-    def run(self, p, last_image: Image.Image, min_denoising_strength: float, controlnet_weight_master: float, steps: float, output_directory: str):
+    def run(
+        self,
+        p,
+        last_image: Image.Image,
+        min_denoising_strength: float,
+        controlnet_master_weight: float,
+        parent_skew: float,
+        neighbors_proximity_skew: float,
+        steps: float,
+        output_directory: str,
+    ):
         controlnet = importlib.import_module('extensions.sd-webui-controlnet.scripts.external_code', 'external_code')
         temporalnet_model = [m for m in controlnet.get_models() if 'temporalnet' in m.lower()][0]
-        canny_model = [m for m in controlnet.get_models() if 'canny' in m.lower()][0]
-        self.controlnet_weight_master = controlnet_weight_master
+        canny_model = [m for m in controlnet.get_models() if 'canny' in m.lower() and 'v11' in m][0]
+        self.controlnet_master_weight = controlnet_master_weight
+        self.parent_skew = parent_skew
+        self.neighbors_proximity_skew = neighbors_proximity_skew
         self.cn_units = [
-            controlnet.ControlNetUnit(
-                model=temporalnet_model,
-                pixel_perfect=True,
-                control_mode=controlnet.ControlMode.CONTROL,
-            ),
-            controlnet.ControlNetUnit(
-                model=temporalnet_model,
-                pixel_perfect=True,
-                control_mode=controlnet.ControlMode.CONTROL,
-            ),
-            # controlnet.ControlNetUnit(
-            #     model=canny_model,
-            #     module="canny",
-            #     pixel_perfect=True,
-            #     control_mode=controlnet.ControlMode.CONTROL,
-            # ),
-            # controlnet.ControlNetUnit(
-            #     model=canny_model,
-            #     module="canny",
-            #     pixel_perfect=True,
-            #     control_mode=controlnet.ControlMode.CONTROL,
-            # ),
+            *[
+                copy(controlnet.ControlNetUnit(
+                    model=canny_model,
+                    module="canny",
+                    pixel_perfect=True,
+                    control_mode=controlnet.ControlMode.CONTROL,
+                ))
+                for _ in range(2)
+            ],
+            *[
+                copy(controlnet.ControlNetUnit(
+                    module="reference_adain",
+                    pixel_perfect=True,
+                    control_mode=controlnet.ControlMode.CONTROL,
+                ))
+                for _ in range(2)
+            ],
         ]
         controlnet.update_cn_script_in_processing(p, self.cn_units)
         # processing.fix_seed(p)
@@ -89,26 +98,32 @@ class Script(scripts.Script):
 
         depth_difference = start_depth - end_depth
         middle_step = (end_step + start_step) // 2
-        max_depth = max(1, math.ceil(math.log2(self.total_steps)))
+        middle_ratio = (middle_step - start_step) / (end_step - start_step)
+        max_depth = max(1, math.floor(math.log2(self.total_steps + 1)) - 2)
         freedom = math.log(end_step - start_step, self.total_steps - 1)
-        print(freedom)
 
         next_p = copy(p)
         next_p.do_not_save_samples = True
         # bezier interpolation
         next_p.init_images[0] = Image.blend(start_image, end_image, middle_step / (self.total_steps - 1))
 
-        self.cn_units[0].image = numpy.array(start_image)
-        self.cn_units[0].weight = self.controlnet_weight_master * (1 - ((depth_difference / max_depth) + 1) / 2)
+        cn_parent_skew = ((depth_difference / max_depth) + 1) / 2
 
-        # self.cn_units[2].image = numpy.array(start_image)
-        # self.cn_units[2].weight = self.controlnet_weight_master * (1 - middle_ratio) * (1 - (middle_step - start_step) / self.total_steps)
+        cn_start_weight = self.controlnet_master_weight
+        cn_start_weight *= 1 - self.parent_skew * cn_parent_skew
+        cn_start_weight *= 1 - self.neighbors_proximity_skew * (2 * middle_ratio - 1)
 
-        self.cn_units[1].image = numpy.array(end_image)
-        self.cn_units[1].weight = self.controlnet_weight_master * ((depth_difference / max_depth) + 1) / 2
+        for unit in self.cn_units[::2]:
+            unit.image = numpy.array(start_image)
+            unit.weight = cn_start_weight
 
-        # self.cn_units[3].image = numpy.array(end_image)
-        # self.cn_units[3].weight = self.controlnet_weight_master * middle_ratio * (1 - (end_step - middle_step) / self.total_steps)
+        cn_end_weight = self.controlnet_master_weight
+        cn_end_weight *= 1 - self.parent_skew * (1 - cn_parent_skew)
+        cn_end_weight *= 1 - self.neighbors_proximity_skew * (1 - 2 * middle_ratio)
+
+        for unit in self.cn_units[1::2]:
+            unit.image = numpy.array(end_image)
+            unit.weight = cn_end_weight
 
         min_denoising_strength = self.min_denoising_strength * ((depth_difference / max_depth) + 1) / 2
         next_p.denoising_strength *= min_denoising_strength + freedom * (1 - min_denoising_strength)
